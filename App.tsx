@@ -1,3 +1,4 @@
+
 import React, { useState, useRef, useEffect } from 'react';
 import { Upload, FileVideo, AlertCircle, PlayCircle, Grid, BarChart2, Download, TrendingUp, Smartphone, Monitor, ArrowLeft, Layers, Loader2, List, Settings, Zap, Highlighter, Link as LinkIcon, Youtube, X, CheckCircle2 } from 'lucide-react';
 import { Button } from './components/Button';
@@ -56,145 +57,241 @@ const App = () => {
     }
   };
 
-  const resolveYoutubeVideo = async (url: string): Promise<{ url: string, filename: string }> => {
-    // List of active Cobalt instances (mostly v10)
-    // We prioritize instances that are known to be stable
-    const instances = [
-      'https://api.tiklydown.eu',
-      'https://cobalt.kwiatekmiki.pl',
-      'https://cobalt.arms.nu',
-      'https://api.wyman.lat',
-      'https://cobalt.xyzen.dev',
-      'https://api.doubutsu.wtf',
-      'https://cobalt.q1.pm',
-    ];
-
-    const errors: string[] = [];
-
-    for (const base of instances) {
-      // Clean base url: remove trailing slash
-      const baseUrl = base.endsWith('/') ? base.slice(0, -1) : base;
-
-      // Cobalt v10 standard is just POST / with { url }
-      // Some legacy v7 might need /api/json, but v10 is dominant now.
-      const attempts = [
-        {
-          endpoint: baseUrl, 
-          body: { url: url } // Minimal payload is best for compatibility
-        },
-        {
-          endpoint: `${baseUrl}/api/json`, // Legacy/Alternative endpoint
-          body: { url: url }
-        }
-      ];
-
-      for (const attempt of attempts) {
-        try {
-          console.log(`Attempting ${attempt.endpoint}...`);
-          
-          const options: RequestInit = {
-            method: 'POST',
-            headers: {
-              'Accept': 'application/json',
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(attempt.body),
-            referrerPolicy: 'no-referrer',
-            credentials: 'omit'
-          };
-
-          // Try DIRECT connection first
-          let response;
-          let usedProxy = false;
-          
-          try {
-             response = await fetch(attempt.endpoint, options);
-          } catch (e) {
-             console.log(`Direct fetch to ${attempt.endpoint} failed, trying proxy chain...`);
-             
-             // Fallback to PROXY 1: allorigins (Often more reliable for JSON)
-             try {
-                console.log("Direct failed, trying allorigins...");
-                const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(attempt.endpoint)}`;
-                response = await fetch(proxyUrl, options);
-                usedProxy = true;
-             } catch (proxyErr) {
-                 // Fallback to PROXY 2: corsproxy.io
-                 try {
-                   console.log("Primary proxy failed, trying corsproxy...");
-                   const proxyUrl2 = `https://corsproxy.io/?${encodeURIComponent(attempt.endpoint)}`;
-                   response = await fetch(proxyUrl2, options);
-                   usedProxy = true;
-                 } catch (proxyErr2) {
-                   // Fallback to PROXY 3: thingproxy
-                   console.log("Secondary proxy failed, trying thingproxy...");
-                   const proxyUrl3 = `https://thingproxy.freeboard.io/fetch/${attempt.endpoint}`;
-                   response = await fetch(proxyUrl3, options);
-                   usedProxy = true;
-                 }
-             }
-          }
-
-          if (!response) continue;
-
-          // Important: Cobalt returns 400/error status if processing fails, but body has JSON details.
-          // We must try to parse JSON even if !response.ok
-          
-          let data;
-          try {
-              data = await response.json();
-          } catch (jsonErr) {
-              // If JSON parse fails AND response was not OK, it's a hard network/server error
-              if (!response.ok) {
-                 const errText = `Status ${response.status} (Non-JSON)`;
-                 console.warn(`Instance ${attempt.endpoint} failed: ${errText}`);
-                 errors.push(`${attempt.endpoint}: ${errText}`);
-                 continue;
-              }
-              // If response WAS ok but JSON invalid, skip
-              console.warn(`Instance ${attempt.endpoint} returned invalid JSON`);
-              continue;
-          }
-
-          // Analyze response data
-          if (data) {
-             // Handle explicit Cobalt error structure
-             if (data.status === 'error' || data.text) {
-                 const errorText = data.text || 'Unknown API error';
-                 console.warn(`Instance ${attempt.endpoint} api error:`, errorText);
-                 
-                 // If specific errors, don't keep trying other instances as they will likely fail too
-                 if (errorText.toLowerCase().includes('private') || errorText.toLowerCase().includes('restricted') || errorText.toLowerCase().includes('password')) {
-                     throw new Error(errorText);
-                 }
-                 continue;
-             }
-             
-             // Check for success URL (v10 usually returns 'url', v7 might return 'picker')
-             const directUrl = data.url || (data.picker && data.picker.length > 0 ? data.picker[0].url : null);
-             
-             if (directUrl) {
-                console.log(`Successfully resolved via ${attempt.endpoint}`);
-                return {
-                  url: directUrl,
-                  filename: data.filename || 'youtube_video.mp4'
-                };
-             }
-          }
-        } catch (e) {
-          console.warn(`Instance ${base} exception:`, e);
-          // If we intentionally threw an error (like "Private video"), rethrow it to stop the loop
-          if (e instanceof Error && (e.message.toLowerCase().includes('private') || e.message.toLowerCase().includes('restricted'))) {
-              throw e;
-          }
-          errors.push(`${base}: ${e instanceof Error ? e.message : String(e)}`);
-        }
+  const cleanYoutubeUrl = (url: string): string => {
+    try {
+      const urlObj = new URL(url);
+      // Strip common tracking params
+      ['feature', 't', 'si', 'pp'].forEach(p => urlObj.searchParams.delete(p));
+      
+      // Keep only v param for watch URLs
+      if (urlObj.hostname.includes('youtube.com') && urlObj.pathname === '/watch') {
+        const v = urlObj.searchParams.get('v');
+        if (v) return `https://www.youtube.com/watch?v=${v}`;
       }
+      // Return bare URL for youtu.be
+      if (urlObj.hostname.includes('youtu.be')) {
+         return `${urlObj.protocol}//${urlObj.hostname}${urlObj.pathname}`;
+      }
+      return urlObj.toString();
+    } catch {
+      return url;
+    }
+  };
+
+  const getYoutubeVideoId = (url: string): string | null => {
+    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
+    const match = url.match(regExp);
+    return (match && match[2].length === 11) ? match[2] : null;
+  };
+
+  const resolveYoutubeVideo = async (url: string): Promise<{ url: string, filename: string }> => {
+    const errors: string[] = [];
+    const cleanUrl = cleanYoutubeUrl(url);
+    const videoId = getYoutubeVideoId(cleanUrl);
+
+    if (!videoId) {
+        throw new Error("Could not extract video ID from URL");
     }
 
-    // If we get here, all instances failed
-    console.error("All Cobalt instances failed.", errors);
-    throw new Error(`Could not resolve video stream. Please check if the video is private or age-restricted. (Debug: ${errors.length} attempts failed)`);
+    // Standardized Fetch Helper with Proxy Rotation
+    const fetchWithProxy = async (url: string, options: RequestInit = {}) => {
+       // Method check - GET vs POST affect proxy choice
+       const isPost = options.method === 'POST';
+
+       const proxies = isPost ? [
+          // POST Compatible Proxies
+          (u: string) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+          (u: string) => `https://thingproxy.freeboard.io/fetch/${u}`,
+          (u: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`
+       ] : [
+          // GET Compatible Proxies - Prioritize CodeTabs/AllOrigins for JSON
+          (u: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+          (u: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+          (u: string) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+          (u: string) => `https://thingproxy.freeboard.io/fetch/${u}`
+       ];
+
+       // 1. Try Direct (if no-cors is acceptable or API supports CORS)
+       try {
+          const res = await fetch(url, { ...options, referrerPolicy: 'no-referrer' });
+          if (res.ok) return res;
+       } catch {}
+
+       // 2. Try Proxies
+       for (const proxyGen of proxies) {
+          try {
+             const res = await fetch(proxyGen(url), { ...options, referrerPolicy: 'no-referrer' });
+             if (res.ok) return res;
+          } catch {}
+       }
+       throw new Error("Connection failed via all proxies");
+    };
+
+    // Retry Helper
+    const tryResolve = async (name: string, instances: string[], logic: (base: string) => Promise<{url:string, filename:string} | null>) => {
+       // Randomize to spread load
+       const shuffled = [...instances].sort(() => Math.random() - 0.5).slice(0, 10); // Try up to 10
+       for (const base of shuffled) {
+          try {
+             const result = await logic(base);
+             if (result) return result;
+          } catch (e: any) {
+             errors.push(`${name}(${base}): ${e.message}`);
+          }
+       }
+       return null;
+    };
+
+    // --- STRATEGY 1: PIPED API (Best for raw streams) ---
+    const pipedInstances = [
+        'https://pipedapi.kavin.rocks',
+        'https://api.piped.privacydev.net',
+        'https://pipedapi.drgns.space',
+        'https://pipedapi.sq.r4fo.com',
+        'https://api.piped.yt',
+        'https://pipedapi.frontendfriendly.xyz',
+        'https://api.piped.projectsegfau.lt',
+        'https://pipedapi.moomoo.me',
+        'https://pipedapi.smnz.de',
+        'https://pipedapi.adminforge.de',
+        'https://pipedapi.lunar.icu',
+        'https://pipedapi.leptons.xyz',
+        'https://pipedapi.ducks.party',
+        'https://pa.il.ax',
+        'https://api.piped.r4fo.com',
+        'https://pipedapi.kavin.rocks',
+        'https://piped-api.lunar.icu'
+    ];
+
+    const pipedResult = await tryResolve('Piped', pipedInstances, async (base) => {
+        const res = await fetchWithProxy(`${base}/streams/${videoId}`);
+        const data = await res.json();
+        
+        if (data.videoStreams && Array.isArray(data.videoStreams)) {
+            // Filter: Prefer audio+video.
+            let streams = data.videoStreams;
+            
+            // Prefer streams that are NOT videoOnly (so they have audio)
+            const muxedStreams = streams.filter((s: any) => s.videoOnly === false);
+            if (muxedStreams.length > 0) {
+                streams = muxedStreams;
+            }
+            
+            if (streams.length > 0) {
+                // Quality sort: 1080p -> 720p -> 480p -> 360p
+                const qualityOrder = ['1080p', '720p', '480p', '360p'];
+                streams.sort((a: any, b: any) => {
+                    const idxA = qualityOrder.indexOf(a.quality);
+                    const idxB = qualityOrder.indexOf(b.quality);
+                    const valA = idxA === -1 ? 99 : idxA;
+                    const valB = idxB === -1 ? 99 : idxB;
+                    return valA - valB;
+                });
+                return { 
+                    url: streams[0].url, 
+                    filename: `${data.title || 'video'}.mp4` 
+                };
+            }
+        }
+        return null;
+    });
+    if (pipedResult) return pipedResult;
+
+    // --- STRATEGY 2: INVIDIOUS API ---
+    const invidiousInstances = [
+        'https://inv.tux.pizza',
+        'https://invidious.projectsegfau.lt',
+        'https://invidious.jing.rocks',
+        'https://vid.puffyan.us',
+        'https://invidious.nerdvpn.de',
+        'https://inv.zzls.xyz',
+        'https://invidious.perennialte.ch',
+        'https://yt.artemislena.eu',
+        'https://invidious.privacyredirect.com',
+        'https://invidious.drgns.space',
+        'https://invidious.lunar.icu',
+        'https://invidious.fdn.fr',
+        'https://invidious.io.lol',
+        'https://invidious.private.coffee',
+        'https://iv.ggtyler.dev',
+        'https://invidious.flokinet.to',
+        'https://invidious.privacydev.net'
+    ];
+
+    const invidiousResult = await tryResolve('Invidious', invidiousInstances, async (base) => {
+        const res = await fetchWithProxy(`${base}/api/v1/videos/${videoId}`);
+        const data = await res.json();
+        
+        // 1. Check formatStreams (pre-muxed)
+        if (data.formatStreams && Array.isArray(data.formatStreams) && data.formatStreams.length > 0) {
+            // Prefer mp4
+            let stream = data.formatStreams.find((s: any) => s.container === 'mp4');
+            // Or take first available
+            if (!stream) stream = data.formatStreams[0];
+
+            if (stream && stream.url) {
+                return { 
+                    url: stream.url, 
+                    filename: `${data.title || 'video'}.${stream.container || 'mp4'}` 
+                };
+            }
+        }
+        
+        // 2. Fallback: adaptiveFormats (if no muxed streams available)
+        if (data.adaptiveFormats && Array.isArray(data.adaptiveFormats)) {
+           // Find highest bitrate video that we might be able to download (browser might not play it if audio is separate, but better than nothing)
+           // Actually, let's look for a stream that might have both or just try the best video.
+           // Invidious adaptive formats separate audio/video usually. 
+           // We will skip for now to avoid silent video, unless we are desperate.
+        }
+
+        return null;
+    });
+    if (invidiousResult) return invidiousResult;
+
+    // --- STRATEGY 3: COBALT API (Final fallback) ---
+    const cobaltInstances = [
+        'https://cobalt.kwiatekmiki.pl',
+        'https://api.tiklydown.eu',
+        'https://cobalt.arms.nu',
+        'https://cobalt.xyzen.dev',
+        'https://api.doubutsu.wtf',
+        'https://cobalt.q1.pm',
+        'https://cobalt.pladys.me',
+        'https://cobalt.club',
+        'https://cobalt.datasync.pw',
+        'https://cobalt.kinsh.uk',
+        'https://cobalt.run',
+        'https://api.cobalt.tools',
+        'https://cobalt.grid.cl',
+        'https://cobalt.nerds.pw',
+        'https://cobalt.anishapps.com',
+        'https://cobalt.200021.xyz',
+        'https://cobalt.slpy.one'
+    ];
+
+    const cobaltResult = await tryResolve('Cobalt', cobaltInstances, async (base) => {
+        const endpoint = base.endsWith('/') ? `${base}api/json` : `${base}/api/json`;
+        
+        const res = await fetchWithProxy(endpoint, {
+            method: 'POST',
+            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: cleanUrl }),
+            referrerPolicy: 'no-referrer'
+        });
+
+        if (res.ok) {
+            const data = await res.json();
+            const u = data.url || (data.picker && data.picker[0]?.url);
+            if (u) return { url: u, filename: data.filename || 'video.mp4' };
+        }
+        return null;
+    });
+    if (cobaltResult) return cobaltResult;
+
+    console.warn("All resolution strategies failed.", errors);
+    const providers = Array.from(new Set(errors.map(e => e.split('(')[0]))).join(', ');
+    throw new Error(`Could not resolve video stream. Providers tried: ${providers || 'None'}. Detailed errors in console.`);
   };
 
   const handleUrlAnalyze = async () => {
@@ -214,7 +311,6 @@ const App = () => {
       let downloadUrl = trimmedUrl;
       let filename = "imported_video.mp4";
       
-      // If it looks like YouTube, resolve it first
       if (trimmedUrl.includes('youtube.com') || trimmedUrl.includes('youtu.be')) {
         setAnalysisProgress(2);
         console.log("Resolving YouTube URL...");
@@ -222,7 +318,9 @@ const App = () => {
            const resolved = await resolveYoutubeVideo(trimmedUrl);
            downloadUrl = resolved.url;
            filename = resolved.filename;
-           if (!filename.endsWith('.mp4')) filename += '.mp4';
+           // Sanitize filename
+           filename = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+           
            setResolvedFallbackUrl(downloadUrl);
            console.log("Resolved to direct stream:", downloadUrl);
         } catch (resolverError: any) {
@@ -238,37 +336,54 @@ const App = () => {
 
       setAnalysisProgress(5);
       
-      // Fetch the actual video data (Blob) via proxy
-      // Using corsproxy.io to fetch the video file itself
-      const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(downloadUrl)}`;
-      
       console.log("Fetching video data via proxy...");
       
-      // Size Guard: Check Content-Length HEAD request first if possible, but fetch is simpler for now.
-      // We will check size on chunk arrival or blob creation.
+      let response;
+      let usedProxy = '';
       
-      const response = await fetch(proxyUrl, {
-        referrerPolicy: 'no-referrer',
-        credentials: 'omit'
-      });
-      
-      if (!response.ok) {
-        throw new Error(`Failed to download video data. Status: ${response.status}`);
+      // Proxy Rotation for binary data (Video Blob)
+      const proxyGenerators = [
+        (u: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+        (u: string) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+        (u: string) => `https://thingproxy.freeboard.io/fetch/${u}`,
+        (u: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`
+      ];
+
+      for (const gen of proxyGenerators) {
+         try {
+            const res = await fetch(gen(downloadUrl), { referrerPolicy: 'no-referrer' });
+            if (res.ok) {
+               response = res;
+               usedProxy = gen(downloadUrl).split('/')[2];
+               break;
+            }
+         } catch {}
       }
+      
+      if (!response || !response.ok) {
+        throw new Error(`Failed to download video data. All proxies failed.`);
+      }
+      
+      console.log(`Video fetch successful using ${usedProxy}`);
       
       const blob = await response.blob();
       
-      // Safety Check: 750MB limit for browser blob to avoid crash
       if (blob.size > 750 * 1024 * 1024) {
          throw new Error(`Video is too large for browser analysis (${(blob.size/1024/1024).toFixed(0)}MB). Please download it manually and use the "Upload Video" tab (supports up to 5GB).`);
       }
 
-      // Check if we got a valid video blob (sometimes proxies return error HTML)
+      // Check for Text/HTML content (proxy error pages)
       if (blob.type.includes('text') || blob.type.includes('html')) {
-          throw new Error("Proxy returned invalid data. The video might be blocking access.");
+          throw new Error("Proxy returned invalid data (HTML/Text). The video link might be expired or blocking access.");
       }
 
-      const convertedFile = new File([blob], filename, { type: 'video/mp4' }); 
+      // Infer mime type if blob has it, else default
+      const mimeType = blob.type.includes('video') ? blob.type : 'video/mp4';
+      if (!filename.includes('.')) {
+          filename += mimeType.includes('webm') ? '.webm' : '.mp4';
+      }
+
+      const convertedFile = new File([blob], filename, { type: mimeType }); 
 
       console.log("Video downloaded successfully:", convertedFile.size);
       setIsFetchingUrl(false);
@@ -820,8 +935,15 @@ const App = () => {
                           onChange={(e) => setUrlInput(e.target.value)}
                           className="flex-grow bg-gray-900 border border-gray-700 text-white rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-primary-600 focus:border-transparent transition-all"
                        />
-                       <Button onClick={handleUrlAnalyze} disabled={!urlInput || isFetchingUrl} className="shrink-0 px-6">
-                          {isFetchingUrl ? <Loader2 className="animate-spin" /> : "Analyze Video"}
+                       <Button onClick={handleUrlAnalyze} disabled={!urlInput || isFetchingUrl} className="shrink-0 px-6 min-w-[140px]">
+                          {isFetchingUrl ? (
+                             <>
+                               <Loader2 className="animate-spin" />
+                               <span className="ml-1 text-xs">
+                                 {analysisProgress < 2 ? "Resolving..." : analysisProgress < 5 ? "Downloading..." : "Analyzing..."}
+                               </span>
+                             </>
+                          ) : "Analyze Video"}
                        </Button>
                     </div>
                     
@@ -883,22 +1005,23 @@ const App = () => {
                  <div className="flex gap-4 justify-center flex-wrap">
                     <Button variant="secondary" onClick={resetApp}>Try Another Video</Button>
                     <Button onClick={inputMode === 'url' ? handleUrlAnalyze : handleAnalyze}>Retry Analysis</Button>
-                    {resolvedFallbackUrl && (
-                        <a 
-                           href={resolvedFallbackUrl} 
-                           target="_blank" 
-                           rel="noreferrer" 
-                           className="bg-gray-700 hover:bg-gray-600 text-white rounded-lg font-medium transition-all duration-200 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed px-4 py-2 text-sm"
-                        >
-                           <Download size={16} /> Download Video Manually
-                        </a>
-                    )}
+                    
+                    {/* Manual Fallback Option */}
+                    <a 
+                       href={resolvedFallbackUrl || "https://cobalt.kwiatekmiki.pl"} 
+                       target="_blank" 
+                       rel="noreferrer" 
+                       className="bg-gray-700 hover:bg-gray-600 text-white rounded-lg font-medium transition-all duration-200 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed px-4 py-2 text-sm"
+                    >
+                       <Download size={16} /> 
+                       {resolvedFallbackUrl ? "Download Video Manually" : "Open Manual Downloader"}
+                    </a>
                  </div>
-                 {resolvedFallbackUrl && (
-                    <p className="text-xs text-gray-400 mt-4">
-                        If the automatic download fails, please download the video manually and upload it using the "Upload Video" tab.
-                    </p>
-                 )}
+                 <p className="text-xs text-gray-400 mt-4 max-w-md mx-auto">
+                    {resolvedFallbackUrl 
+                        ? 'If the automatic download fails, please download the video manually and upload it using the "Upload Video" tab.'
+                        : 'If YouTube analysis fails repeatedly, please open the downloader, paste your link there, download the MP4, and upload it manually.'}
+                 </p>
               </div>
            </div>
         )}
