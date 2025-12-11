@@ -1,0 +1,5 @@
+{
+  "name": "ViralClip AI",
+  "description": "AI-powered video analysis tool that auto-generates viral clips, transcripts, and engagement insights from long-form video content.",
+  "requestFramePermissions": []
+}
