@@ -2,9 +2,10 @@ import { GoogleGenAI } from "@google/genai";
 import { AnalysisResult } from "../types";
 
 export const analyzeVideo = async (file: File, onProgress?: (progress: number) => void): Promise<AnalysisResult> => {
-  const apiKey = process.env.API_KEY;
+  // Support both `API_KEY` (preferred) and legacy `GEMINI_API_KEY` for compatibility.
+  const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    throw new Error("API Key not found in environment variables");
+    throw new Error("API Key not found in environment variables. Set API_KEY or GEMINI_API_KEY.");
   }
 
   const ai = new GoogleGenAI({ apiKey });
