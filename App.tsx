@@ -1,6 +1,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { Upload, FileVideo, AlertCircle, PlayCircle, Grid, BarChart2, Download, TrendingUp, Smartphone, Monitor, ArrowLeft, Layers, Loader2, List, Settings, Zap, Highlighter, Link as LinkIcon, Youtube, X, CheckCircle2 } from 'lucide-react';
+import smartcrop from 'smartcrop';
 import { Button } from './components/Button';
 import { analyzeVideo } from './services/geminiService';
 import { AppState, AnalysisResult, Clip } from './types';
@@ -723,26 +724,100 @@ const App = () => {
         return;
     }
     
+    // Smart Crop Logic
+    const analysisCanvas = document.createElement('canvas');
+    const analysisCtx = analysisCanvas.getContext('2d', { willReadFrequently: true });
+
+    // State for smooth crop transition
+    const cropState = {
+        current: { x: 0, y: 0, w: 0, h: 0 },
+        target: { x: 0, y: 0, w: 0, h: 0 },
+        initialized: false,
+        lastAnalysisTime: 0,
+        isAnalyzing: false
+    };
+
     const drawFrame = () => {
         const vidW = video.videoWidth;
         const vidH = video.videoHeight;
-        
-        // Center crop logic for 9:16
         const targetAspect = 9 / 16;
-        let drawW = vidH * targetAspect;
-        let drawH = vidH;
-        let startX = (vidW - drawW) / 2;
-        let startY = 0;
         
-        // If video is already narrower than target, fit width
+        // Default center crop parameters (fallback)
+        let defaultW, defaultH, defaultX, defaultY;
+
         if (vidW / vidH < targetAspect) {
-             drawW = vidW;
-             drawH = vidW / targetAspect;
-             startX = 0;
-             startY = (vidH - drawH) / 2;
+             defaultW = vidW;
+             defaultH = vidW / targetAspect;
+             defaultX = 0;
+             defaultY = (vidH - defaultH) / 2;
+        } else {
+             defaultW = vidH * targetAspect;
+             defaultH = vidH;
+             defaultX = (vidW - defaultW) / 2;
+             defaultY = 0;
         }
 
-        ctx.drawImage(video, startX, startY, drawW, drawH, 0, 0, canvas.width, canvas.height);
+        // Initialize on first frame
+        if (!cropState.initialized) {
+            cropState.current = { x: defaultX, y: defaultY, w: defaultW, h: defaultH };
+            cropState.target = { x: defaultX, y: defaultY, w: defaultW, h: defaultH };
+            cropState.initialized = true;
+        }
+
+        // Run smart crop analysis periodically
+        const now = Date.now();
+        if (!cropState.isAnalyzing && (now - cropState.lastAnalysisTime > 1000)) {
+            cropState.isAnalyzing = true;
+
+            // Downscale for performance
+            const smallW = 256;
+            const scale = smallW / vidW;
+            const smallH = vidH * scale;
+
+            if (analysisCanvas.width !== smallW || analysisCanvas.height !== smallH) {
+                analysisCanvas.width = smallW;
+                analysisCanvas.height = smallH;
+            }
+
+            analysisCtx?.drawImage(video, 0, 0, smallW, smallH);
+
+            // Request 9:16 crop from smartcrop
+            smartcrop.crop(analysisCanvas, { width: 90, height: 160, ruleOfThirds: true })
+                .then(result => {
+                    if (result && result.topCrop) {
+                        const c = result.topCrop;
+                        // Map back to video coordinates
+                        cropState.target = {
+                            x: c.x / scale,
+                            y: c.y / scale,
+                            w: c.width / scale,
+                            h: c.height / scale
+                        };
+                    }
+                    cropState.lastAnalysisTime = Date.now();
+                    cropState.isAnalyzing = false;
+                })
+                .catch(err => {
+                    console.warn("Smartcrop error:", err);
+                    cropState.isAnalyzing = false;
+                });
+        }
+
+        // Smoothly interpolate current crop towards target
+        const smoothing = 0.05;
+        cropState.current.x += (cropState.target.x - cropState.current.x) * smoothing;
+        cropState.current.y += (cropState.target.y - cropState.current.y) * smoothing;
+        cropState.current.w += (cropState.target.w - cropState.current.w) * smoothing;
+        cropState.current.h += (cropState.target.h - cropState.current.h) * smoothing;
+
+        ctx.drawImage(
+            video,
+            cropState.current.x,
+            cropState.current.y,
+            cropState.current.w,
+            cropState.current.h,
+            0, 0, canvas.width, canvas.height
+        );
     };
 
     if ('requestVideoFrameCallback' in video) {
