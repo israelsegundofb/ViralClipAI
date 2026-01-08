@@ -691,8 +691,8 @@ const App = () => {
         ctx.drawImage(video, startX, startY, drawW, drawH, 0, 0, canvas.width, canvas.height);
     };
 
-    if ('requestVideoFrameCallback' in (video as any)) {
-        const onFrame = (now: number, metadata: any) => {
+    if ('requestVideoFrameCallback' in video) {
+        const onFrame = (now: number, metadata: VideoFrameMetadata) => {
             if (!isRendering && !renderingClipId) {
                 // Stopped externally
                 return;
@@ -711,10 +711,8 @@ const App = () => {
             const currentProgress = ((video.currentTime - startTime) / duration) * 100;
             setRenderProgress(Math.min(99, Math.max(0, currentProgress)));
 
-            // @ts-ignore
             video.requestVideoFrameCallback(onFrame);
         };
-        // @ts-ignore
         video.requestVideoFrameCallback(onFrame);
     } else {
         const renderLoop = () => {
