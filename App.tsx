@@ -7,7 +7,7 @@ import { AppState, AnalysisResult, Clip } from './types';
 import { ClipCard } from './components/ClipCard';
 import { TopicMap } from './components/TopicMap';
 import { WaveformTimeline } from './components/WaveformTimeline';
-import { parseTimestampToSeconds } from './utils';
+import { parseTimestampToSeconds, muxStreams } from './utils';
 
 const App = () => {
   const [file, setFile] = useState<File | null>(null);
@@ -84,7 +84,7 @@ const App = () => {
     return (match && match[2].length === 11) ? match[2] : null;
   };
 
-  const resolveYoutubeVideo = async (url: string): Promise<{ url: string, filename: string }> => {
+  const resolveYoutubeVideo = async (url: string): Promise<{ url: string, audioUrl?: string, filename: string }> => {
     const errors: string[] = [];
     const cleanUrl = cleanYoutubeUrl(url);
     const videoId = getYoutubeVideoId(cleanUrl);
@@ -239,10 +239,41 @@ const App = () => {
         
         // 2. Fallback: adaptiveFormats (if no muxed streams available)
         if (data.adaptiveFormats && Array.isArray(data.adaptiveFormats)) {
-           // Find highest bitrate video that we might be able to download (browser might not play it if audio is separate, but better than nothing)
-           // Actually, let's look for a stream that might have both or just try the best video.
-           // Invidious adaptive formats separate audio/video usually. 
-           // We will skip for now to avoid silent video, unless we are desperate.
+           // Filter for video and audio
+           const videoStreams = data.adaptiveFormats.filter((s: any) => s.type && s.type.includes('video'));
+           const audioStreams = data.adaptiveFormats.filter((s: any) => s.type && s.type.includes('audio'));
+
+           if (videoStreams.length > 0) {
+               // Prefer mp4
+               videoStreams.sort((a: any, b: any) => {
+                    const aIsMp4 = a.container === 'mp4' ? 1 : 0;
+                    const bIsMp4 = b.container === 'mp4' ? 1 : 0;
+                    if (aIsMp4 !== bIsMp4) return bIsMp4 - aIsMp4;
+                    return (parseInt(b.bitrate) || 0) - (parseInt(a.bitrate) || 0);
+               });
+               const bestVideo = videoStreams[0];
+               const isMp4 = bestVideo.container === 'mp4';
+
+               let bestAudio = null;
+               if (audioStreams.length > 0) {
+                    // Try to match container
+                    const compatibleAudio = audioStreams.filter((s: any) => s.container === (isMp4 ? 'm4a' : 'webm') || s.container === bestVideo.container);
+                    if (compatibleAudio.length > 0) {
+                       compatibleAudio.sort((a: any, b: any) => (parseInt(b.bitrate) || 0) - (parseInt(a.bitrate) || 0));
+                       bestAudio = compatibleAudio[0];
+                    } else {
+                       // Fallback to any audio
+                       audioStreams.sort((a: any, b: any) => (parseInt(b.bitrate) || 0) - (parseInt(a.bitrate) || 0));
+                       bestAudio = audioStreams[0];
+                    }
+               }
+
+               return {
+                   url: bestVideo.url,
+                   audioUrl: bestAudio ? bestAudio.url : undefined,
+                   filename: `${data.title || 'video'}.${bestVideo.container || 'mp4'}`
+               };
+           }
         }
 
         return null;
@@ -309,6 +340,7 @@ const App = () => {
 
     try {
       let downloadUrl = trimmedUrl;
+      let audioUrl: string | undefined;
       let filename = "imported_video.mp4";
       
       if (trimmedUrl.includes('youtube.com') || trimmedUrl.includes('youtu.be')) {
@@ -317,12 +349,13 @@ const App = () => {
         try {
            const resolved = await resolveYoutubeVideo(trimmedUrl);
            downloadUrl = resolved.url;
+           audioUrl = resolved.audioUrl;
            filename = resolved.filename;
            // Sanitize filename
            filename = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
            
            setResolvedFallbackUrl(downloadUrl);
-           console.log("Resolved to direct stream:", downloadUrl);
+           console.log("Resolved to direct stream:", downloadUrl, audioUrl ? "+ Audio Stream" : "");
         } catch (resolverError: any) {
            throw new Error(`YouTube Resolution Failed: ${resolverError.message}`);
         }
@@ -335,44 +368,67 @@ const App = () => {
       }
 
       setAnalysisProgress(5);
-      
       console.log("Fetching video data via proxy...");
       
-      let response;
-      let usedProxy = '';
-      
-      // Proxy Rotation for binary data (Video Blob)
-      const proxyGenerators = [
-        (u: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
-        (u: string) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
-        (u: string) => `https://thingproxy.freeboard.io/fetch/${u}`,
-        (u: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`
-      ];
+      // Helper to download blob with proxy rotation
+      const downloadBlobWithProxy = async (url: string): Promise<Blob> => {
+          const proxyGenerators = [
+            (u: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+            (u: string) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+            (u: string) => `https://thingproxy.freeboard.io/fetch/${u}`,
+            (u: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`
+          ];
 
-      for (const gen of proxyGenerators) {
-         try {
-            const res = await fetch(gen(downloadUrl), { referrerPolicy: 'no-referrer' });
-            if (res.ok) {
-               response = res;
-               usedProxy = gen(downloadUrl).split('/')[2];
-               break;
-            }
-         } catch {}
+          for (const gen of proxyGenerators) {
+             try {
+                const res = await fetch(gen(url), { referrerPolicy: 'no-referrer' });
+                if (res.ok) {
+                   const b = await res.blob();
+                   // Check for invalid text/html content
+                   if (b.type.includes('text') || b.type.includes('html')) {
+                       continue;
+                   }
+                   return b;
+                }
+             } catch {}
+          }
+          throw new Error("Failed to download data via proxies.");
+      };
+
+      let blob: Blob;
+
+      if (audioUrl) {
+          console.log("Downloading separated video and audio streams...");
+          setAnalysisProgress(3);
+
+          try {
+             const [videoBlob, audioBlob] = await Promise.all([
+                 downloadBlobWithProxy(downloadUrl),
+                 downloadBlobWithProxy(audioUrl)
+             ]);
+
+             console.log("Both streams downloaded. Muxing...");
+             setAnalysisProgress(5);
+             blob = await muxStreams(videoBlob, audioBlob, filename);
+          } catch (e: any) {
+             console.warn("Muxing failed or download failed:", e);
+             // Fallback to just video if audio download/mux fails,
+             // but if video download failed we can't do much.
+             // We'll try just video download if it wasn't the video that failed?
+             // Actually, if Promise.all fails, we land here.
+             // We will try to just download videoUrl as fallback.
+             console.log("Falling back to video only stream...");
+             blob = await downloadBlobWithProxy(downloadUrl);
+          }
+      } else {
+          blob = await downloadBlobWithProxy(downloadUrl);
       }
-      
-      if (!response || !response.ok) {
-        throw new Error(`Failed to download video data. All proxies failed.`);
-      }
-      
-      console.log(`Video fetch successful using ${usedProxy}`);
-      
-      const blob = await response.blob();
       
       if (blob.size > 750 * 1024 * 1024) {
          throw new Error(`Video is too large for browser analysis (${(blob.size/1024/1024).toFixed(0)}MB). Please download it manually and use the "Upload Video" tab (supports up to 5GB).`);
       }
 
-      // Check for Text/HTML content (proxy error pages)
+      // Check for Text/HTML content (proxy error pages) - redundant check but safety net
       if (blob.type.includes('text') || blob.type.includes('html')) {
           throw new Error("Proxy returned invalid data (HTML/Text). The video link might be expired or blocking access.");
       }
@@ -385,7 +441,7 @@ const App = () => {
 
       const convertedFile = new File([blob], filename, { type: mimeType }); 
 
-      console.log("Video downloaded successfully:", convertedFile.size);
+      console.log("Video processed successfully:", convertedFile.size);
       setIsFetchingUrl(false);
 
       setFile(convertedFile);
