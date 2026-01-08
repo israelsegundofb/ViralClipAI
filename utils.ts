@@ -1,7 +1,3 @@
-
-import { FFmpeg } from '@ffmpeg/ffmpeg';
-import { fetchFile, toBlobURL } from '@ffmpeg/util';
-
 export const fileToGenerativePart = async (file: File): Promise<{ inlineData: { data: string; mimeType: string } }> => {
   return new Promise((resolve, reject) => {
     // Safety check for file size to prevent browser crash on readAsDataURL with 5GB files
@@ -108,45 +104,4 @@ export const formatSecondsToTimestamp = (seconds: number): string => {
   const sDisplay = `${s < 10 ? '0' : ''}${s}`;
   
   return `${hDisplay}${mDisplay}${sDisplay}`;
-};
-
-export const muxStreams = async (videoBlob: Blob, audioBlob: Blob, filename: string): Promise<Blob> => {
-    const ffmpeg = new FFmpeg();
-    // Using 0.12.10 to match package.json.
-    // Note: To use this in production, the server must send COOP/COEP headers:
-    // 'Cross-Origin-Opener-Policy': 'same-origin'
-    // 'Cross-Origin-Embedder-Policy': 'require-corp'
-    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm';
-
-    // We use the single-threaded version if headers are an issue, but default to multi-threaded in 0.12.6 if supported.
-    // However, 0.12.6 default is mt. We will try to load it.
-    // To ensure compatibility without SharedArrayBuffer (which requires specific headers), we should use the single-threaded build if available,
-    // or rely on the user having headers.
-    // But since we can't control user headers easily here, we might need a workaround.
-    // However, for this task, we will assume standard ffmpeg.wasm usage.
-
-    // Note: If Cross-Origin-Opener-Policy is not set, this will fail with SharedArrayBuffer error.
-    // Since we are in a dev environment or specific deployment, we'll try to use the single-threaded core if we can target it,
-    // or just standard.
-    // Checking the node_modules, we saw ffmpeg-core.js and ffmpeg-core.wasm in @ffmpeg/core/dist/esm.
-    // This implies it might be single threaded or checking at runtime.
-
-    await ffmpeg.load({
-        coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-        wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-    });
-
-    const videoExt = videoBlob.type.includes('webm') ? 'webm' : 'mp4';
-    const audioExt = audioBlob.type.includes('webm') ? 'webm' : 'm4a'; // m4a for aac/mp4 audio
-
-    await ffmpeg.writeFile(`video.${videoExt}`, await fetchFile(videoBlob));
-    await ffmpeg.writeFile(`audio.${audioExt}`, await fetchFile(audioBlob));
-
-    const outputExt = filename.endsWith('.webm') ? 'webm' : 'mp4';
-
-    // -c copy is fastest and doesn't re-encode
-    await ffmpeg.exec(['-i', `video.${videoExt}`, '-i', `audio.${audioExt}`, '-c', 'copy', `output.${outputExt}`]);
-
-    const data = await ffmpeg.readFile(`output.${outputExt}`);
-    return new Blob([data], { type: outputExt === 'webm' ? 'video/webm' : 'video/mp4' });
 };

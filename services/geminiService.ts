@@ -153,9 +153,7 @@ export const analyzeVideo = async (file: File, onProgress?: (progress: number) =
           { text: prompt }
         ]
       },
-      config: {
-        responseMimeType: 'application/json',
-      }
+      // Config removed to prevent INVALID_ARGUMENT errors; prompt handles JSON requirement.
     });
 
     onProgress?.(95);
