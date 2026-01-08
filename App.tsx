@@ -582,12 +582,10 @@ const App = () => {
     
     let audioStream: MediaStream | null = null;
     try {
-       // @ts-ignore
        if (video.captureStream) {
-         // @ts-ignore
          audioStream = video.captureStream();
-       } else if ((video as any).mozCaptureStream) { 
-         audioStream = (video as any).mozCaptureStream();
+       } else if (video.mozCaptureStream) {
+         audioStream = video.mozCaptureStream();
        }
     } catch (e) {
       console.warn("Could not capture audio stream from video element directly.", e);
